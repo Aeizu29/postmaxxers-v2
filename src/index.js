@@ -1,6 +1,14 @@
 import puppeteer from '@cloudflare/puppeteer';
 
 const RANKING_URL = 'https://incels.is/members/?key=most_posts';
+const deadlines = { launch: 12000, cookies: 7000, navigation: 18000, inspection: 7000, cleanup: 5000 };
+function bounded(promise, ms, stage) {
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Timed out at ' + stage)), ms); })
+  ]).finally(() => clearTimeout(timer));
+}
 const json = (data, status = 200) => new Response(JSON.stringify(data, null, 2), {
   status,
   headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' },
@@ -18,9 +26,14 @@ export default {
 
     let browser;
     const started = Date.now();
+    let stage = 'initializing';
+    const logStage = (name) => { stage = name; console.log('[probe]', name, 'elapsedMs=' + (Date.now() - started)); };
+    let cookieCount = 0;
     try {
-      browser = await puppeteer.launch(env.MYBROWSER);
-      const page = await browser.newPage();
+      logStage('browser_launch');
+      browser = await bounded(puppeteer.launch(env.MYBROWSER), deadlines.launch, stage);
+      logStage('new_page');
+      const page = await bounded(browser.newPage(), deadlines.cookies, stage);
       // Create only first-party cookies for the forum before making any request.
       // Keep session values in Cloudflare secrets, never in source code or logs.
       const cookies = String(env.FORUM_COOKIE).split(';').map(part => {
@@ -32,12 +45,18 @@ export default {
         return { name, value, url: 'https://incels.is/', secure: true };
       }).filter(Boolean);
       if (!cookies.length) return json({ ok: false, error: 'FORUM_COOKIE has no valid name=value entries.' }, 422);
-      await page.setCookie(...cookies);
-      await page.goto(RANKING_URL, { waitUntil: 'domcontentloaded', timeout: 25000 });
-      const outcome = await inspect(page);
+      cookieCount = cookies.length;
+      logStage('cookies');
+      await bounded(page.setCookie(...cookies), deadlines.cookies, stage);
+      logStage('forum_navigation');
+      await bounded(page.goto(RANKING_URL, { waitUntil: 'domcontentloaded', timeout: 15000 }), deadlines.navigation, stage);
+      logStage('ranking_inspection');
+      const outcome = await bounded(inspect(page), deadlines.inspection, stage);
+      logStage('completed');
       return json({
         ok: outcome.rankingLooksPresent,
         authenticationMethod: 'cookie',
+        stagesCompleted: 'browser launch, cookie setup, navigation, inspection',
         rankingLooksPresent: outcome.rankingLooksPresent,
         sample: outcome.sample,
         pageCategory: outcome.pageCategory,
@@ -45,9 +64,13 @@ export default {
         note: 'Read-only test. Samples are not uploaded. A positive result is not proof the full ranking parser works.'
       }, outcome.rankingLooksPresent ? 200 : 422);
     } catch (e) {
-      return json({ ok: false, stage: 'browser_probe', errorType: String(e?.name || 'Error'), note: 'Check wrangler tail for a sanitized error; no credentials are logged.', elapsedMs: Date.now() - started }, 502);
+      console.error('[probe] failed', { stage, errorType: String(e?.name || 'Error'), elapsedMs: Date.now() - started });
+      return json({ ok: false, stage, errorType: String(e?.name || 'Error'), timeout: /Timed out/.test(String(e?.message)), elapsedMs: Date.now() - started, note: 'No cookies or tokens logged. Inspect Observability logs for the last completed stage.' }, 502);
     } finally {
-      if (browser) await browser.close().catch(() => {});
+      if (browser) {
+        try { await bounded(browser.close(), deadlines.cleanup, 'browser_cleanup'); }
+        catch { console.warn('[probe] browser cleanup did not complete within 5s'); }
+      }
     }
   }
 };
