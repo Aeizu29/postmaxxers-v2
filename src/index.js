@@ -28,6 +28,41 @@ export default {
       if (!supplied || supplied !== env.ADMIN_TOKEN) return json({ ok: false, error: 'Unauthorized', tokenReceived: Boolean(supplied) }, 401);
       return json({ ok: true, authenticated: true, browserStarted: false });
     }
+    // Safe browser reuse diagnostic against example.com only.
+    // The browser process may persist, but a fresh isolated context is used each time.
+    if (url.pathname === '/session-check') {
+      if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
+      const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') || '';
+      if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) return json({ ok: false, error: 'Unauthorized' }, 401);
+      let browser, context;
+      let reused = false;
+      try {
+        const active = await bounded(puppeteer.sessions(env.MYBROWSER), 7000, 'list_sessions');
+        for (const session of active) {
+          try {
+            browser = await bounded(puppeteer.connect(env.MYBROWSER, session.sessionId), 7000, 'connect_session');
+            reused = true;
+            break;
+          } catch { /* Session may expire between listing and connecting. */ }
+        }
+        if (!browser) browser = await bounded(puppeteer.launch(env.MYBROWSER, { keep_alive: 120000 }), 12000, 'launch_session');
+        context = await bounded(browser.createBrowserContext(), 7000, 'create_context');
+        const page = await bounded(context.newPage(), 7000, 'new_page');
+        const response = await bounded(page.goto('https://example.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }), 18000, 'test_navigation');
+        return json({
+          ok: response?.status() === 200,
+          browserReused: reused,
+          httpStatus: response?.status() ?? null,
+          pageTitle: (await page.title()).slice(0, 80),
+          note: 'Tested browser-process reuse only. Forum access and login persistence are not tested.'
+        });
+      } catch (e) {
+        return json({ ok: false, errorType: String(e?.name || 'Error'), note: 'Browser reuse diagnostic failed; no secrets logged.' }, 502);
+      } finally {
+        try { if (context) await bounded(context.close(), 5000, 'close_context'); } catch {}
+        try { if (browser) await bounded(browser.disconnect(), 5000, 'disconnect_browser'); } catch {}
+      }
+    }
     if (url.pathname !== '/probe' || request.method !== 'POST') return json({ ok: false, error: 'Use POST /probe or GET /health.' }, 404);
     const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') || '';
     if (!env.ADMIN_TOKEN || !token || token !== env.ADMIN_TOKEN) return json({ ok: false, error: 'Unauthorized' }, 401);
