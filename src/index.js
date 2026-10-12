@@ -58,9 +58,10 @@ export default {
       logStage('cookies');
       await bounded(page.setCookie(...cookies), deadlines.cookies, stage);
       logStage('forum_navigation');
-      await bounded(page.goto(RANKING_URL, { waitUntil: 'domcontentloaded', timeout: 15000 }), deadlines.navigation, stage);
+      const navigationResponse = await bounded(page.goto(RANKING_URL, { waitUntil: 'domcontentloaded', timeout: 15000 }), deadlines.navigation, stage);
       logStage('ranking_inspection');
       const outcome = await bounded(inspect(page), deadlines.inspection, stage);
+      outcome.httpStatus = navigationResponse?.status() ?? null;
       logStage('completed');
       return json({
         ok: outcome.rankingLooksPresent,
@@ -69,6 +70,10 @@ export default {
         rankingLooksPresent: outcome.rankingLooksPresent,
         sample: outcome.sample,
         pageCategory: outcome.pageCategory,
+        httpStatus: outcome.httpStatus,
+        finalPage: outcome.finalPage,
+        pageTitle: outcome.pageTitle,
+        diagnostics: outcome.diagnostics,
         elapsedMs: Date.now() - started,
         note: 'Read-only test. Samples are not uploaded. A positive result is not proof the full ranking parser works.'
       }, outcome.rankingLooksPresent ? 200 : 422);
@@ -94,6 +99,16 @@ async function inspect(page) {
     const unique = [...new Set(sample.map(x => x.href))];
     return {
       rankingLooksPresent: unique.length >= 3 && /most posts|messages|posts/i.test(text),
+      finalPage: location.origin + location.pathname,
+      pageTitle: (document.title || '').slice(0, 120),
+      diagnostics: {
+        memberProfileLinks: document.querySelectorAll('a[href*="/members/"]').length,
+        uniqueSampleProfiles: unique.length,
+        pageTextLength: text.length,
+        hasChallengeKeywords: /captcha|verify you are human|checking your browser|just a moment/i.test(text),
+        hasPasswordInput: Boolean(document.querySelector('input[type="password"]')),
+        hasMemberListKeywords: /most posts|notable members|members/i.test(text),
+      },
       sample,
       pageCategory: /captcha|verify you are human|checking your browser/i.test(text) ? 'verification' :
         document.querySelector('input[type="password"]') ? 'login' : unique.length >= 3 ? 'members-list' : 'unknown'
