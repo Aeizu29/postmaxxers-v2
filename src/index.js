@@ -60,8 +60,26 @@ export default {
       logStage('forum_navigation');
       const navigationResponse = await bounded(page.goto(RANKING_URL, { waitUntil: 'domcontentloaded', timeout: 15000 }), deadlines.navigation, stage);
       logStage('ranking_inspection');
-      const outcome = await bounded(inspect(page), deadlines.inspection, stage);
-      outcome.httpStatus = navigationResponse?.status() ?? null;
+      let outcome = await bounded(inspect(page), deadlines.inspection, stage);
+      const initialHttpStatus = navigationResponse?.status() ?? null;
+      const challengeAtStart = /just a moment/i.test(outcome.pageTitle || '');
+      let waitedMs = 0;
+      // A challenge page can transition automatically; give it up to 20 seconds.
+      // Only observe the current page: no challenge-solving or repeated requests.
+      if (challengeAtStart) {
+        logStage('automatic_challenge_wait');
+        const waitStart = Date.now();
+        while (Date.now() - waitStart < 20000) {
+          await new Promise(resolve => setTimeout(resolve, Math.min(2000, 20000 - (Date.now() - waitStart))));
+          outcome = await bounded(inspect(page), deadlines.inspection, 'challenge_reinspection');
+          if (!/just a moment/i.test(outcome.pageTitle || '')) break;
+        }
+        waitedMs = Date.now() - waitStart;
+      }
+      outcome.httpStatus = initialHttpStatus;
+      outcome.waitedMs = waitedMs;
+      outcome.challengeAtStart = challengeAtStart;
+      outcome.challengeStillPresent = /just a moment/i.test(outcome.pageTitle || '');
       logStage('completed');
       return json({
         ok: outcome.rankingLooksPresent,
@@ -71,6 +89,9 @@ export default {
         sample: outcome.sample,
         pageCategory: outcome.pageCategory,
         httpStatus: outcome.httpStatus,
+        waitedMs: outcome.waitedMs,
+        challengeAtStart: outcome.challengeAtStart,
+        challengeStillPresent: outcome.challengeStillPresent,
         finalPage: outcome.finalPage,
         pageTitle: outcome.pageTitle,
         diagnostics: outcome.diagnostics,
