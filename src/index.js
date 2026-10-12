@@ -1,7 +1,6 @@
 import puppeteer from '@cloudflare/puppeteer';
 
 const RANKING_URL = 'https://incels.is/members/?key=most_posts';
-const ORIGIN = 'https://incels.is';
 const json = (data, status = 200) => new Response(JSON.stringify(data, null, 2), {
   status,
   headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' },
@@ -15,58 +14,30 @@ export default {
     if (url.pathname !== '/probe' || request.method !== 'POST') return json({ ok: false, error: 'Use POST /probe or GET /health.' }, 404);
     const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') || '';
     if (!env.ADMIN_TOKEN || !token || token !== env.ADMIN_TOKEN) return json({ ok: false, error: 'Unauthorized' }, 401);
-    if (!env.FORUM_USERNAME || !env.FORUM_PASSWORD) return json({ ok: false, error: 'Configure FORUM_USERNAME and FORUM_PASSWORD as Worker secrets.' }, 503);
+    if (!env.FORUM_COOKIE) return json({ ok: false, error: 'Configure FORUM_COOKIE as a Worker secret.' }, 503);
 
     let browser;
     const started = Date.now();
     try {
       browser = await puppeteer.launch(env.MYBROWSER);
       const page = await browser.newPage();
+      // Create only first-party cookies for the forum before making any request.
+      // Keep session values in Cloudflare secrets, never in source code or logs.
+      const cookies = String(env.FORUM_COOKIE).split(';').map(part => {
+        const i = part.indexOf('=');
+        if (i <= 0) return null;
+        const name = part.slice(0, i).trim();
+        const value = part.slice(i + 1).trim();
+        if (!/^[!#$%&'*+.^_`|~0-9A-Za-z_-]+$/.test(name) || !value) return null;
+        return { name, value, url: 'https://incels.is/', secure: true };
+      }).filter(Boolean);
+      if (!cookies.length) return json({ ok: false, error: 'FORUM_COOKIE has no valid name=value entries.' }, 422);
+      await page.setCookie(...cookies);
       await page.goto(RANKING_URL, { waitUntil: 'domcontentloaded', timeout: 25000 });
-      let initial = await inspect(page);
-      let attemptedLogin = false;
-      let loginFormDetected = false;
-      if (!initial.rankingLooksPresent) {
-        const loginLink = await page.$('a[href*="/login"], a[href*="login/"]');
-        if (loginLink) {
-          const href = await page.evaluate(el => el.href, loginLink);
-          if (href && new URL(href).origin === ORIGIN) await page.goto(href, { waitUntil: 'domcontentloaded', timeout: 20000 });
-        } else {
-          await page.goto(`${ORIGIN}/login/`, { waitUntil: 'domcontentloaded', timeout: 20000 });
-        }
-        loginFormDetected = await page.evaluate(() => Boolean(document.querySelector('input[type="password"]')));
-        if (loginFormDetected) {
-          attemptedLogin = true;
-          const result = await page.evaluate(({ username, password }) => {
-            const pass = document.querySelector('input[type="password"]');
-            const form = pass?.form;
-            if (!form) return { ok: false, reason: 'No login form detected' };
-            const fields = [...form.querySelectorAll('input')];
-            const user = fields.find(x => /^(login|username|email)$/i.test(x.name || '')) ||
-                         fields.find(x => /text|email/i.test(x.type) && x !== pass);
-            if (!user) return { ok: false, reason: 'Username input not found' };
-            const setValue = (el, value) => {
-              const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-              if (setter) setter.call(el, value); else el.value = value;
-              el.dispatchEvent(new Event('input', { bubbles: true }));
-              el.dispatchEvent(new Event('change', { bubbles: true }));
-            };
-            setValue(user, username);
-            setValue(pass, password);
-            const submit = form.querySelector('button[type="submit"], input[type="submit"]');
-            if (submit) submit.click(); else form.requestSubmit();
-            return { ok: true };
-          }, { username: env.FORUM_USERNAME, password: env.FORUM_PASSWORD });
-          if (result.ok) {
-            await new Promise(resolve => setTimeout(resolve, 1800));
-            await page.goto(RANKING_URL, { waitUntil: 'domcontentloaded', timeout: 25000 });
-          }
-        }
-      }
       const outcome = await inspect(page);
       return json({
         ok: outcome.rankingLooksPresent,
-        attemptedLogin, loginFormDetected,
+        authenticationMethod: 'cookie',
         rankingLooksPresent: outcome.rankingLooksPresent,
         sample: outcome.sample,
         pageCategory: outcome.pageCategory,
