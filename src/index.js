@@ -66,7 +66,7 @@ export default {
     // Benign persistence test: example.com only, no forum cookies.
     if (url.pathname === '/state-check') {
       if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
-      const token = request.headers.get('authorization')?.replace(/^Bearer\\s+/i, '') || '';
+      const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') || '';
       if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) return json({ ok: false, error: 'Unauthorized' }, 401);
       let browser, page;
       let browserReused = false;
