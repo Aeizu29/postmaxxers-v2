@@ -1,0 +1,62 @@
+name: Cloud Browser Access Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  access-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Install Playwright Chromium
+        run: |
+          npm install --no-save playwright
+          npx playwright install --with-deps chromium
+
+      - name: Test public leaderboard access (read-only)
+        env:
+          TARGET_URL: https://incels.is/members/?key=most_posts
+        run: |
+          node <<'NODE'
+          const { chromium } = require('playwright');
+          (async () => {
+            const browser = await chromium.launch({ headless: true });
+            try {
+              const page = await browser.newPage();
+              const response = await page.goto(process.env.TARGET_URL, {
+                waitUntil: 'domcontentloaded',
+                timeout: 25000
+              });
+              let title = (await page.title()).slice(0, 100);
+              const initialChallenge = /just a moment/i.test(title);
+              if (initialChallenge) {
+                await page.waitForTimeout(20000);
+                title = (await page.title()).slice(0, 100);
+              }
+              const text = await page.locator('body').innerText().catch(() => '');
+              const memberLinks = await page.locator('a[href*="/members/"]').count();
+              const challengePresent = /just a moment/i.test(title);
+              const result = {
+                initialHttpStatus: response?.status() ?? null,
+                pageTitle: title,
+                initialChallenge,
+                challengePresent,
+                memberLinks,
+                pageTextLength: text.length,
+                outcome: challengePresent ? 'CHALLENGE' : memberLinks >= 3 ? 'POTENTIAL_LEADERBOARD' : 'NOT_CONFIRMED'
+              };
+              console.log('Read-only public page test:', JSON.stringify(result, null, 2));
+              if (challengePresent || result.initialHttpStatus === 403) {
+                console.log('Access was challenged or denied. Stopping without retries.');
+              }
+            } finally {
+              await browser.close();
+            }
+          })().catch(error => {
+            console.error('Browser test failed:', error.name);
+            process.exitCode = 1;
+          });
+          NODE
