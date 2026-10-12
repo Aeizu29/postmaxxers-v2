@@ -43,6 +43,17 @@ export default {
       browser = await bounded(puppeteer.launch(env.MYBROWSER), deadlines.launch, stage);
       logStage('new_page');
       const page = await bounded(browser.newPage(), deadlines.cookies, stage);
+      // Aggregate browser events only; never record URLs, headers, script content or errors.
+      const browserEvents = { pageErrors: 0, consoleErrors: 0, failedRequests: 0, http4xx: 0, http5xx: 0, challengeResponses: 0 };
+      page.on('pageerror', () => { browserEvents.pageErrors++; });
+      page.on('console', msg => { if (msg.type() === 'error') browserEvents.consoleErrors++; });
+      page.on('requestfailed', () => { browserEvents.failedRequests++; });
+      page.on('response', response => {
+        const status = response.status();
+        if (status >= 400 && status < 500) browserEvents.http4xx++;
+        if (status >= 500) browserEvents.http5xx++;
+        if (status === 403) browserEvents.challengeResponses++;
+      });
       // Create only first-party cookies for the forum before making any request.
       // Keep session values in Cloudflare secrets, never in source code or logs.
       const cookies = String(env.FORUM_COOKIE).split(';').map(part => {
@@ -76,6 +87,8 @@ export default {
         }
         waitedMs = Date.now() - waitStart;
       }
+      outcome.browserEvents = browserEvents;
+      outcome.javascriptEnabled = await bounded(page.evaluate(() => 6 * 7 === 42), deadlines.inspection, 'javascript_check');
       outcome.httpStatus = initialHttpStatus;
       outcome.waitedMs = waitedMs;
       outcome.challengeAtStart = challengeAtStart;
@@ -95,6 +108,8 @@ export default {
         finalPage: outcome.finalPage,
         pageTitle: outcome.pageTitle,
         diagnostics: outcome.diagnostics,
+        browserEvents: outcome.browserEvents,
+        javascriptEnabled: outcome.javascriptEnabled,
         elapsedMs: Date.now() - started,
         note: 'Read-only test. Samples are not uploaded. A positive result is not proof the full ranking parser works.'
       }, outcome.rankingLooksPresent ? 200 : 422);
