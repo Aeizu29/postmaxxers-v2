@@ -22,7 +22,7 @@ export default {
     // Fast authentication-only diagnostic. Never echoes tokens or secrets.
     if (url.pathname === '/auth-check') {
       if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
-      const bearer = request.headers.get('authorization')?.match(/^Bearer\\s+(.+)$/i);
+      const bearer = request.headers.get('authorization')?.match(/^Bearer\s+(.+)$/i);
       const supplied = bearer?.[1] || '';
       if (!env.ADMIN_TOKEN) return json({ ok: false, error: 'ADMIN_TOKEN secret is missing from this deployment' }, 503);
       if (!supplied || supplied !== env.ADMIN_TOKEN) return json({ ok: false, error: 'Unauthorized', tokenReceived: Boolean(supplied) }, 401);
