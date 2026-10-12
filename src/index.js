@@ -63,6 +63,46 @@ export default {
         try { if (browser) await bounded(browser.disconnect(), 5000, 'disconnect_browser'); } catch {}
       }
     }
+    // Benign persistence test: example.com only, no forum cookies.
+    if (url.pathname === '/state-check') {
+      if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
+      const token = request.headers.get('authorization')?.replace(/^Bearer\\s+/i, '') || '';
+      if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) return json({ ok: false, error: 'Unauthorized' }, 401);
+      let browser, page;
+      let browserReused = false;
+      try {
+        const active = await bounded(puppeteer.sessions(env.MYBROWSER), 7000, 'list_sessions');
+        for (const session of active) {
+          try {
+            browser = await bounded(puppeteer.connect(env.MYBROWSER, session.sessionId), 7000, 'connect_session');
+            browserReused = true;
+            break;
+          } catch { /* Session expired. */ }
+        }
+        if (!browser) browser = await bounded(puppeteer.launch(env.MYBROWSER, { keep_alive: 120000 }), 12000, 'launch_session');
+        // Use the default context deliberately; isolated contexts don't share cookies.
+        page = await bounded(browser.newPage(), 7000, 'new_page');
+        const response = await bounded(page.goto('https://example.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }), 18000, 'test_navigation');
+        const cookieName = 'postmaxxers_state_test';
+        const cookieValue = 'harmless_v2_marker';
+        const cookies = await bounded(page.cookies('https://example.com/'), 7000, 'read_cookies');
+        const statePersisted = cookies.some(c => c.name === cookieName && c.value === cookieValue);
+        await bounded(page.setCookie({ name: cookieName, value: cookieValue, url: 'https://example.com/', secure: true, expires: Math.floor(Date.now() / 1000) + 3600 }), 7000, 'set_test_cookie');
+        return json({
+          ok: response?.status() === 200,
+          browserReused,
+          httpStatus: response?.status() ?? null,
+          statePersisted,
+          testCookieWritten: true,
+          note: 'Only a harmless example.com cookie is used. Does not establish forum access.'
+        });
+      } catch (e) {
+        return json({ ok: false, errorType: String(e?.name || 'Error'), note: 'State diagnostic failed; no credentials logged.' }, 502);
+      } finally {
+        try { if (page) await bounded(page.close(), 5000, 'close_page'); } catch {}
+        try { if (browser) await bounded(browser.disconnect(), 5000, 'disconnect_browser'); } catch {}
+      }
+    }
     if (url.pathname !== '/probe' || request.method !== 'POST') return json({ ok: false, error: 'Use POST /probe or GET /health.' }, 404);
     const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') || '';
     if (!env.ADMIN_TOKEN || !token || token !== env.ADMIN_TOKEN) return json({ ok: false, error: 'Unauthorized' }, 401);
