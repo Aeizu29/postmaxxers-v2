@@ -1,0 +1,1 @@
+{"name":"postmaxxers-v2-cloud-probe","private":true,"type":"module","scripts":{"dev":"wrangler dev","deploy":"wrangler deploy"},"devDependencies":{"@cloudflare/puppeteer":"^1.1.0","wrangler":"^4.0.0"}}
